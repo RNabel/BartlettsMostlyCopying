@@ -81,18 +81,17 @@ GCP *globalp; /* Ptr to global area containing pointers */
 
 /* Objects which are allocated in the heap have a one word header. The
 form of the header is:
-31 17 16 1 0
+31            17 16             1 0
 +---------------+----------------+-+
 | # ptrs in obj | # words in obj |1|
 +---------------+----------------+-+
-| user data | <-- user data starts here. GCP
-. ptrs come first
-.
-.
-| |
+|           user data              | <-- user data starts here. GCP
+                .                     ptrs come first
+                .
+                .
+|                                  |
 +----------------------------------+
-29
-COMPACTING GARBAGE COLLECTION WITH AMBIGUOUS ROOTS
+
 The number of words in the object count INCLUDES one word for the header
 and INCLUDES the words occupied by pointers.
 When an object is forwarded, the header will be replaced by the pointer to
@@ -172,31 +171,36 @@ void collect() {
             cnt; /* Counter */
     GCP cp, /* Pointer to sweep across a page */
             pp; /* Pointer to move constituent objects */
-/* Check for out of space during collection */
+    /* Check for out of space during collection */
     if (next_space != current_space) {
         fprintf(stderr, "gcalloc - Out of space during collect\n");
         exit(1);
     }
-/* Allocate current page on a direct call */
+
+    /* Allocate current page on a direct call */
     if (freewords != 0) {
         *freep = MAKE_HEADER(freewords, 0);
         freewords = 0;
     }
-/* Advance space */
+
+    /* Advance space */
     next_space = (current_space + 1) & 077777;
     allocatedpages = 0;
-/* Examine stack and registers for possible pointers */
+
+    /* Examine stack and registers for possible pointers */
     queue_head = 0;
     for (fp = (unsigned *) (&fp);
          fp <= stackbase;
          fp = (unsigned *) (((char *) fp) + STACKINC)) {
         promote_page(GCP_to_PAGE(*fp));
     }
-/* Move global objects */
+
+    /* Move global objects */
     cnt = globals;
     while (cnt--)
         *globalp[cnt] = (int) move((GCP) *globalp[cnt]);
-/* Sweep across promoted pages and move their constituent items */
+
+    /* Sweep across promoted pages and move their constituent items */
     while (queue_head != 0) {
         cp = PAGE_to_GCP(queue_head);
         while (GCP_to_PAGE(cp) == queue_head && cp != freep) {
@@ -210,7 +214,8 @@ void collect() {
         }
         queue_head = link[queue_head];
     }
-/* Finished */
+
+    /* Finished */
     current_space = next_space;
 }
 
