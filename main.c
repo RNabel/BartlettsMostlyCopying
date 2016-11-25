@@ -52,14 +52,14 @@ extern GCP gcalloc(size_t i, int i1);
 /* The heap consists of a contiguous set of pages of memory. */
 int firstheappage, /* Page # of first heap page */
         lastheappage, /* Page # of last heap page */
-        heappages, /* # of pages in the heap */
-        freewords, /* # words left on the current page */
-        *freep, /* Ptr to the first free word on the current page */
-        allocatedpages, /* # of pages currently allocated for storage */
-        freepage, /* First possible free page */
+        numOfHeapPages, /* # of pages in the heap */
+        numFreeWordsInCurrent, /* # words left on the current page */
+        *firstFreeWordInPage, /* Ptr to the first free word on the current page */
+        numOfAllocatedPages, /* # of pages currently allocated for storage */
+        firstFreePage, /* First possible free page */
         *space, /* Space number for each page */
-        *link, /* Page link for each page */
-        *type, /* Type of object allocated on the page */
+        *pageQueue, /* Page pageQueue for each page */
+        *typeMapping, /* Type of object allocated on the page */
         queue_head, /* Head of list of pages */
         queue_tail, /* Tail of list of pages */
         current_space, /* Current space number */
@@ -76,7 +76,7 @@ GCP *globalp; /* Ptr to global area containing pointers */
 #define WORDBYTES (sizeof(int))
 #define STACKINC 4
 /* Page number <--> pointer conversion is done by the following defines */
-#define PAGE_to_GCP(p) ((GCP) ((p) *PAGEBYTES))
+#define PAGE_to_GCP(p) ((GCP) ((p) * PAGEBYTES))
 #define GCP_to_PAGE(p) (((int)p) / PAGEBYTES)
 
 /* Objects which are allocated in the heap have a one word header. The
@@ -98,10 +98,10 @@ When an object is forwarded, the header will be replaced by the pointer to
 the new object which will have bit 0 equal to 0.
 */
 #define MAKE_HEADER(words, ptrs) ((ptrs)<<17 | (words)<<1 | 1)
-#define FORWARDED(header) (((header) & 1) == 0)
-#define HEADER_PTRS(header) ((header)>>17 & 0x7FFF)
-#define HEADER_WORDS(header) ((header)>>1 & 0xFFFF)
-#define HEADER_BYTES(header) (((header)>>1 & 0xFFFF)*WORDBYTES)
+#define FORWARDED(header) (((header) & 1) == 0) // Get the flag whether the object is forwarded.
+#define HEADER_PTRS(header) ((header)>>17 & 0x7FFF) // Get the # of pointers from the header
+#define HEADER_WORDS(header) ((header)>>1 & 0xFFFF) // Get the size of the object from the header.
+#define HEADER_BYTES(header) (((header)>>1 & 0xFFFF)*WORDBYTES) // Get the entire header minus the FORWARDED flag.
 /* Garbage collector */
 /* A page index is advanced by the following function */
 int next_page(int page) {
@@ -112,10 +112,10 @@ int next_page(int page) {
 /* A page is added to the page queue by the following function. */
 void queue(int page) {
     if (queue_head != 0)
-        link[queue_tail] = page;
+        pageQueue[queue_tail] = page;
     else
         queue_head = page;
-    link[page] = 0;
+    pageQueue[page] = 0;
     queue_tail = page;
 }
 
@@ -127,40 +127,45 @@ GCP move(GCP cp)
             header; /* Object header */
     GCP np, /* Pointer to the new object */
             from, to; /* Pointers for copying old object */
-/* If NULL, or points to next space, then ok */
+
+    /* If NULL, or points to next space, then ok */
     if (cp == NULL ||
         space[GCP_to_PAGE(cp)] == next_space)
         return (cp);
-/* If cell is already forwarded, return forwarding pointer */
+
+    /* If cell is already forwarded, return forwarding pointer */
     header = cp[-1];
     if (FORWARDED(header)) return ((GCP) header);
-/* Forward cell, leave forwarding pointer in old header */
 
+    /* Forward cell, leave forwarding pointer in old header */
     np = gcalloc(HEADER_BYTES(header) - 4, 0);
     to = np - 1;
     from = cp - 1;
+    // Copy the contents of the object
+
     cnt = HEADER_WORDS(header);
     while (cnt--) *to++ = *from++;
-    cp[-1] = (int) np;
+    cp[-1] = (int) np; // cp points to content, cp[-1] to header.
+
     return (np);
 }
 
 /* Pages which have might have references in the stack or the registers are
 promoted to the next space by the following function. A list of
-promoted pages is formed through the link cells for each page.
+promoted pages is formed through the pageQueue cells for each page.
 */
 void promote_page(int page) {
     /* Page number */
 
     if (page >= firstheappage && page <= lastheappage &&
         space[page] == current_space) {
-        while (type[page] == CONTINUED) {
-            allocatedpages = allocatedpages + 1;
+        while (typeMapping[page] == CONTINUED) {
+            numOfAllocatedPages = numOfAllocatedPages + 1;
             space[page] = next_space;
             page = page - 1;
         }
         space[page] = next_space;
-        allocatedpages = allocatedpages + 1;
+        numOfAllocatedPages = numOfAllocatedPages + 1;
         queue(page);
     }
 }
@@ -178,14 +183,14 @@ void collect() {
     }
 
     /* Allocate current page on a direct call */
-    if (freewords != 0) {
-        *freep = MAKE_HEADER(freewords, 0);
-        freewords = 0;
+    if (numFreeWordsInCurrent != 0) {
+        *firstFreeWordInPage = MAKE_HEADER(numFreeWordsInCurrent, 0);
+        numFreeWordsInCurrent = 0;
     }
 
     /* Advance space */
     next_space = (current_space + 1) & 077777;
-    allocatedpages = 0;
+    numOfAllocatedPages = 0;
 
     /* Examine stack and registers for possible pointers */
     queue_head = 0;
@@ -203,7 +208,7 @@ void collect() {
     /* Sweep across promoted pages and move their constituent items */
     while (queue_head != 0) {
         cp = PAGE_to_GCP(queue_head);
-        while (GCP_to_PAGE(cp) == queue_head && cp != freep) {
+        while (GCP_to_PAGE(cp) == queue_head && cp != firstFreeWordInPage) {
             cnt = HEADER_PTRS(*cp);
             pp = cp + 1;
             while (cnt--) {
@@ -212,7 +217,7 @@ void collect() {
             }
             cp = cp + HEADER_WORDS(*cp);
         }
-        queue_head = link[queue_head];
+        queue_head = pageQueue[queue_head];
     }
 
     /* Finished */
@@ -223,44 +228,45 @@ void collect() {
 allocate one or more pages. If space is not available then the garbage
 collector will be called.
 */
-void allocatepage(int pages) {
+void allocatepage(int numOfPages) {
 /* # of pages to allocate */
 
-    int free, /* # contiguous free pages */
-            firstpage = 0, /* Page # of first free page */
+    int numOfFreePages, /* # contiguous numOfFreePages pages */
+            firstFreePageIndex = 0, /* Page # of first free page */
             allpages; /* # of pages in the heap */
-    if (allocatedpages + pages >= heappages / 2) {
+    if (numOfAllocatedPages + numOfPages >= numOfHeapPages / 2) {
         collect();
         return;
     }
-    free = 0;
-    allpages = heappages;
+    numOfFreePages = 0;
+    allpages = numOfHeapPages;
     while (allpages--) {
-        if (space[freepage] != current_space &&
-            space[freepage] != next_space) {
-            if (free++ == 0) firstpage = freepage;
-            if (free == pages) {
-                freep = PAGE_to_GCP(firstpage);
-                if (current_space != next_space) queue(firstpage);
+        if (space[firstFreePage] != current_space &&
+            space[firstFreePage] != next_space) {
+            if (numOfFreePages++ == 0) firstFreePageIndex = firstFreePage;
+            if (numOfFreePages == numOfPages) {
+                firstFreeWordInPage = PAGE_to_GCP(firstFreePageIndex);
+                if (current_space != next_space) queue(firstFreePageIndex);
 
-                freewords = pages * PAGEWORDS;
-                allocatedpages = allocatedpages + pages;
-                freepage = next_page(freepage);
-                space[firstpage] = next_space;
-                type[firstpage] = OBJECT;
-                while (--pages) {
-                    space[++firstpage] = next_space;
-                    type[firstpage] = CONTINUED;
+                numFreeWordsInCurrent = numOfPages * PAGEWORDS;
+                numOfAllocatedPages = numOfAllocatedPages + numOfPages;
+                firstFreePage = next_page(firstFreePage);
+                space[firstFreePageIndex] = next_space;
+                typeMapping[firstFreePageIndex] = OBJECT;
+                while (--numOfPages) {
+                    space[++firstFreePageIndex] = next_space;
+                    typeMapping[firstFreePageIndex] = CONTINUED;
                 }
                 return;
             }
-        } else free = 0;
-        freepage = next_page(freepage);
-        if (freepage == firstheappage) free = 0;
+        } else numOfFreePages = 0;
+
+        firstFreePage = next_page(firstFreePage);
+        if (firstFreePage == firstheappage) numOfFreePages = 0;
     }
     fprintf(stderr,
             "gcalloc - Unable to allocate %d pages in a %d page heap\n",
-            pages, heappages);
+            numOfPages, numOfHeapPages);
     exit(1);
 }
 
@@ -271,7 +277,7 @@ void gcinit(int heap_size, unsigned stack_base, GCP global_ptr) {
     char *heap;
     int i;
     GCP *gp;
-    heappages = heap_size / PAGEBYTES;
+    numOfHeapPages = heap_size / PAGEBYTES;
     heap = malloc((size_t) (heap_size + PAGEBYTES - 1));
 
     if ((unsigned) heap & (PAGEBYTES - 1)) {
@@ -279,15 +285,15 @@ void gcinit(int heap_size, unsigned stack_base, GCP global_ptr) {
     }
 
     firstheappage = GCP_to_PAGE(heap);
-    lastheappage = firstheappage + heappages - 1;
-    space = ((int *) malloc(heappages * sizeof(int))) - firstheappage;
+    lastheappage = firstheappage + numOfHeapPages - 1;
+    space = ((int *) malloc(numOfHeapPages * sizeof(int))) - firstheappage;
 
     for (i = firstheappage; i <= lastheappage; i++) {
         space[i] = 0;
     }
 
-    link = ((int *) malloc(heappages * sizeof(int))) - firstheappage;
-    type = ((int *) malloc(heappages * sizeof(int))) - firstheappage;
+    pageQueue = ((int *) malloc(numOfHeapPages * sizeof(int))) - firstheappage;
+    typeMapping = ((int *) malloc(numOfHeapPages * sizeof(int))) - firstheappage;
     globals = 0;
     gp = &global_ptr;
 
@@ -310,8 +316,8 @@ void gcinit(int heap_size, unsigned stack_base, GCP global_ptr) {
     stackbase = (unsigned int *) stack_base;
     current_space = 1;
     next_space = 1;
-    freepage = firstheappage;
-    allocatedpages = 0;
+    firstFreePage = firstheappage;
+    numOfAllocatedPages = 0;
     queue_head = 0;
 }
 
@@ -325,20 +331,23 @@ GCP gcalloc(size_t bytes, int pointers)
     int words, /* # of words to allocate */
             i; /* Loop index */
     GCP object; /* Pointer to the object */
+    // Align the required space to the word size.
     words = (int) ((bytes + WORDBYTES - 1) / WORDBYTES + 1);
-    while (words > freewords) {
-        if (freewords != 0) *freep = MAKE_HEADER(freewords, 0);
-        freewords = 0;
+
+    while (words > numFreeWordsInCurrent) {
+        if (numFreeWordsInCurrent != 0) *firstFreeWordInPage = MAKE_HEADER(numFreeWordsInCurrent, 0);
+        numFreeWordsInCurrent = 0;
         allocatepage((words + PAGEWORDS - 1) / PAGEWORDS);
     }
-    *freep = MAKE_HEADER(words, pointers);
-    for (i = 1; i <= pointers; i++) freep[i] = NULL;
-    object = freep + 1;
+
+    *firstFreeWordInPage = MAKE_HEADER(words, pointers);
+    for (i = 1; i <= pointers; i++) firstFreeWordInPage[i] = NULL;
+    object = firstFreeWordInPage + 1;
     if (words < PAGEWORDS) {
-        freewords = freewords - words;
-        freep = freep + words;
+        numFreeWordsInCurrent = numFreeWordsInCurrent - words;
+        firstFreeWordInPage = firstFreeWordInPage + words;
     } else {
-        freewords = 0;
+        numFreeWordsInCurrent = 0;
     }
     return (object);
 }
@@ -347,6 +356,6 @@ int main() {
     gcinit(5120, stackbase, globalp);
     GCP page = gcalloc(50, 2);
     printf("GCP: %p\n", page);
-    printf("Hello, World!");
+    printf("int size: %zu", sizeof(int));
     return 0;
 }
